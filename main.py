@@ -1,81 +1,122 @@
-from ortools.linear_solver import pywraplp
+import pandas as pd
+import numpy as np
+import datetime
+from tabulate import tabulate  # pip install tabulate
 
-# Dados de exemplo com médicos e enfermeiros necessários por cirurgia
-cirurgias = [
-    {'id': 1, 'duracao': 2, 'equipamentos': ['Bisturi'], 'medicos': 1, 'enfermeiros': 1},
-    {'id': 2, 'duracao': 1.5, 'equipamentos': ['Espatula'], 'medicos': 1, 'enfermeiros': 1},
-    {'id': 3, 'duracao': 3, 'equipamentos': ['Bisturi'], 'medicos': 2, 'enfermeiros': 1},
-]
+def parse_instance(filepath):
+    """
+    Lê o arquivo de instância e retorna:
+    - header: dict com 'num_days' e 'capacity_per_day'
+    - df: DataFrame com as colunas ['SurgNr','P1','P2','P3']
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
 
-# Salas com médicos e enfermeiros disponíveis
-salas = [
-    {'id': 1, 'equipamentos': ['Bisturi'], 'capacidade': 1, 'medicos_max': 2, 'enfermeiros_max': 2},
-    {'id': 2, 'equipamentos': ['Espatula'], 'capacidade': 1, 'medicos_max': 1, 'enfermeiros_max': 1},
-    {'id': 3, 'equipamentos': ['Bisturi'], 'capacidade': 2, 'medicos_max': 3, 'enfermeiros_max': 2},
-]
+    header = {}
+    surgeries = []
+    mode = None
 
-# Horas de operação
-horas_dia = 12
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('#'):
+            if 'INSTANCE CHARACTERISTICS' in line:
+                mode = 'header'
+            elif 'SURGERIES' in line:
+                mode = 'surgeries'
+            continue
 
-# Criando o solver
-solver = pywraplp.Solver.CreateSolver('SCIP')
+        if mode == 'header':
+            val, desc = line.split('\t')
+            if desc == 'number of OR-days':
+                header['num_days'] = int(val)
+            elif desc == 'Capacity OR-days in minutes':
+                header['capacity_per_day'] = float(val)
 
-# Variáveis de decisão: alocação das cirurgias (1 se cirurgia i for na sala j, 0 caso contrário)
-x = {}
-for i in range(len(cirurgias)):
-    for j in range(len(salas)):
-        x[i, j] = solver.BoolVar(f'x_{i}_{j}')
+        elif mode == 'surgeries' and not line.startswith('SurgNr'):
+            p = line.split('\t')
+            surgeries.append({
+                'SurgNr': int(p[0]),
+                'P1': float(p[1]),
+                'P2': float(p[2]),
+                'P3': float(p[3])
+            })
 
-# Variáveis para alocar médicos e enfermeiros às salas
-medicos_alocados = {}
-enfermeiros_alocados = {}
+    return header, pd.DataFrame(surgeries)
 
-for i in range(len(cirurgias)):
-    for j in range(len(salas)):
-        medicos_alocados[i, j] = solver.IntVar(0, 100, f'medicos_{i}_{j}')
-        enfermeiros_alocados[i, j] = solver.IntVar(0, 100, f'enfermeiros_{i}_{j}')
+def ffd_schedule(header, df):
+    """
+    Aplica First‐Fit Decreasing (FFD) para atribuir cada cirurgia a um OR‐day.
+    Retorna um DataFrame com ['SurgNr','duration','Block'].
+    """
+    df = df.copy()
+    df['duration'] = np.exp(df['P1'] + (df['P2']**2)/2) + df['P3']
+    df_sorted = df.sort_values('duration', ascending=False).reset_index(drop=True)
 
-# Função objetivo: Minimizar o tempo total de uso das salas
-solver.Minimize(solver.Sum(cirurgias[i]['duracao'] * x[i, j] for i in range(len(cirurgias)) for j in range(len(salas))))
+    capacity = [header['capacity_per_day']] * header['num_days']
+    assignments = []
 
-# Restrições
+    for _, row in df_sorted.iterrows():
+        dur = row['duration']
+        placed = False
+        for day in range(header['num_days']):
+            if capacity[day] >= dur:
+                capacity[day] -= dur
+                assignments.append({
+                    'SurgNr': row['SurgNr'],
+                    'duration': dur,
+                    'Block': day + 1
+                })
+                placed = True
+                break
+        if not placed:
+            assignments.append({
+                'SurgNr': row['SurgNr'],
+                'duration': dur,
+                'Block': None
+            })
 
-# 1. Cada cirurgia deve ser alocada a exatamente uma sala
-for i in range(len(cirurgias)):
-    solver.Add(solver.Sum(x[i, j] for j in range(len(salas))) == 1)
+    return pd.DataFrame(assignments)
 
-# 2. Cada sala pode ter no máximo uma cirurgia por vez
-for j in range(len(salas)):
-    solver.Add(solver.Sum(x[i, j] for i in range(len(cirurgias))) <= salas[j]['capacidade'])
+# -----------------------
+# Parâmetros de entrada
+# -----------------------
+filepath    = '1_ordays_5_load_0,8_1.txt'        # caminho para seu arquivo de instância
+start_date  = datetime.date(2025, 5, 15)        # data do primeiro dia
+start_hour  = 5                               # hora de início do turno (por ex. 8 = 08:00)
 
-# 3. A sala deve ter os equipamentos necessários para a cirurgia
-for i in range(len(cirurgias)):
-    for j in range(len(salas)):
-        if not all(equip in salas[j]['equipamentos'] for equip in cirurgias[i]['equipamentos']):
-            solver.Add(x[i, j] == 0)
+# -----------------------
+# Execução
+# -----------------------
+header, surgeries_df = parse_instance(filepath)
+assign_df = ffd_schedule(header, surgeries_df)
 
-# 4. A sala não pode ultrapassar a capacidade de médicos e enfermeiros
-for j in range(len(salas)):
-    solver.Add(solver.Sum(medicos_alocados[i, j] for i in range(len(cirurgias))) <= salas[j]['medicos_max'])
-    solver.Add(solver.Sum(enfermeiros_alocados[i, j] for i in range(len(cirurgias))) <= salas[j]['enfermeiros_max'])
+# ordenar por dia (internamente em 'Block') e por duração decrescente
+assign_df = assign_df.sort_values(['Block','duration'], ascending=[True,False]).reset_index(drop=True)
 
-    for i in range(len(cirurgias)):
-        solver.Add(medicos_alocados[i, j] >= cirurgias[i]['medicos'] * x[i, j])
-        solver.Add(enfermeiros_alocados[i, j] >= cirurgias[i]['enfermeiros'] * x[i, j])
+# calcula offset cumulativo dentro de cada dia
+assign_df['start_offset'] = assign_df.groupby('Block')['duration'].cumsum() - assign_df['duration']
 
-# 5. Tempo total de uso das salas não pode ultrapassar as horas do dia
-for j in range(len(salas)):
-    solver.Add(solver.Sum(cirurgias[i]['duracao'] * x[i, j] for i in range(len(cirurgias))) <= horas_dia)
+# converte offset em data e hora legíveis
+def to_time(offset_min):
+    base = datetime.datetime.combine(datetime.date.today(), datetime.time(start_hour, 0))
+    t = base + datetime.timedelta(minutes=offset_min)
+    return t.time().strftime('%H:%M')
 
-# Resolver o modelo
-status = solver.Solve()
+assign_df['Date']  = assign_df['Block'].apply(
+    lambda d: start_date + datetime.timedelta(days=d-1) if pd.notnull(d) else None
+)
+assign_df['Start'] = assign_df['start_offset'].apply(lambda m: to_time(m) if pd.notnull(m) else None)
+assign_df['End']   = (assign_df['start_offset'] + assign_df['duration']).apply(
+    lambda m: to_time(m) if pd.notnull(m) else None
+)
 
-# Exibir a solução
-if status == pywraplp.Solver.OPTIMAL:
-    print("Solução ótima encontrada:")
-    for i in range(len(cirurgias)):
-        for j in range(len(salas)):
-            if x[i, j].solution_value() >= 0.99:  # Se a variável de decisão for 1
-                print(f"Cirurgia {cirurgias[i]['id']} alocada na Sala {salas[j]['id']} (Duração: {cirurgias[i]['duracao']} horas)")
-else:
-    print("Nenhuma solução ótima encontrada.")
+# montar tabela final sem a coluna 'Block'
+schedule_df = assign_df[['SurgNr','Date','Start','End','duration']].rename(
+    columns={'duration':'Duration (min)'}
+)
+
+# exibir no console
+print("\nEscalonamento Detalhado (FFD):")
+print(tabulate(schedule_df, headers='keys', tablefmt='pretty', showindex=False))
