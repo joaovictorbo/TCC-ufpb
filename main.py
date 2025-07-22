@@ -47,7 +47,7 @@ def parse_instance(filepath):
 
 def ffd_schedule(header, df):
     """
-    Aplica First‐Fit Decreasing (FFD) para atribuir cada cirurgia a um OR‐day.
+    Aplica First-Fit Decreasing (FFD) para atribuir cada cirurgia a um OR‐day.
     Retorna um DataFrame com ['SurgNr','duration','Block'].
     """
     df = df.copy()
